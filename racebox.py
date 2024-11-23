@@ -8,6 +8,7 @@ from bleak import BleakScanner, BleakClient
 RACEBOX_UART_SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
 RX_CHAR_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
 TX_CHAR_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
+NMEA_TX_UUID = "00001103-0000-1000-8000-00805f9b34fb"
 DOWNLOAD_COMMAND = bytes([0xB5, 0x62, 0xFF, 0x23, 0x00, 0x00, 0x22, 0x65])  # Command to initiate data download
 
 # CSV headers based on the parsed data structure
@@ -39,7 +40,8 @@ def save_to_csv(data_list, device_name):
             writer.writerows(data_list)
         print(f"Data saved to {file_name}")
 
-async def scan_and_connect():
+async def scan_and_connect(monitor_only=False):
+    """Scan for RaceBox devices and connect to them."""
     devices = await BleakScanner.discover()
     racebox_devices = [device for device in devices if device.name and "RaceBox" in device.name]
 
@@ -47,7 +49,10 @@ async def scan_and_connect():
         print(f"Found {len(racebox_devices)} RaceBox devices.")
         for device in racebox_devices:
             print(f"Connecting to {device.name} - {device.address}")
-            await connect_and_download(device)
+            if monitor_only:
+                await read_current_position(device)
+            else:
+                await connect_and_download(device)
     else:
         print("No RaceBox devices found.")
 
@@ -175,8 +180,75 @@ async def connect_and_download(device):
     if session_data:
         save_to_csv(session_data, device.name)
 
-async def main():
-    await scan_and_connect()
+async def read_current_position(device):
+    """Read and display current position data continuously."""
+    session_data = []  # Data for the current session
+    buffer = bytearray()
+    total_records = 0
+    try:
+        async with BleakClient(device) as client:
+            await client.connect()
+            print(f"Connected to {device.name}")
+            services = client.services  # Use services property instead of deprecated get_services
+            if RACEBOX_UART_SERVICE_UUID not in [str(service.uuid) for service in services]:
+                print(f"Device {device.name} does not have the NMEA service.")
+                return
+            
+            def notification_handler(sender, data):
+                nonlocal buffer, session_data, total_records
+                buffer.extend(data)
+
+                # Process the buffer
+                while len(buffer) >= 8:  # Minimum packet size to check for message class and ID
+                    if buffer[:2] == bytes([0xB5, 0x62]):
+                        message_class, message_id = buffer[2], buffer[3]
+                        packet_length = struct.unpack('<H', buffer[4:6])[0]
+                        full_packet_length = packet_length + 8
+                        
+                        if len(buffer) < full_packet_length:
+                            break  # Wait for more data if the full packet hasn't been received yet
+
+                        if validate_checksum(buffer[:full_packet_length]):
+                            if message_class == 0xFF:
+                                if message_id == 0x23:  # Download data start
+                                    total_records = struct.unpack('<I', buffer[6:10])[0]
+                                    print(f"Expecting {total_records} records.")
+                                elif message_id == 0x21:  # History data
+                                    record = parse_21_message(buffer[:full_packet_length])
+                                    print("History data")
+                                elif message_id == 0x01:  # Live data
+                                    record = parse_01_message(buffer[:full_packet_length])
+                                    print(f"Position: {record['Latitude']:.6f}°, {record['Longitude']:.6f}°")
+                                    print(f"Speed: {record['Speed']:.1f} km/h")
+                                    print(f"Altitude: {record['WGS Altitude']:.1f} m")
+                                    print("-" * 40)
+                                elif message_id == 0x02:  # ACK indicating download complete
+                                    print("Download complete.")
+                                elif message_id == 0x03:  # NACK
+                                    print("NACK received")
+                                elif message_id == 0x26:  # Session change - save current session data
+                                    print("Standalone recording state changed.")
+                            buffer = buffer[full_packet_length:]
+
+            await client.start_notify(TX_CHAR_UUID, notification_handler)
+            while True:
+                await asyncio.sleep(1)
+                
+    except KeyboardInterrupt:
+        await client.stop_notify(TX_CHAR_UUID)
+        print("\nMonitoring stopped by user")
+    except Exception as e:
+        print(f"Error: {e}")
+
+# Modify main() to accept command line arguments
+def main():
+    import argparse
+    parser = argparse.ArgumentParser(description='RaceBox data tool')
+    parser.add_argument('--monitor', action='store_true', 
+                       help='Monitor current position instead of downloading history')
+    args = parser.parse_args()
+    
+    asyncio.run(scan_and_connect(monitor_only=args.monitor))
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
