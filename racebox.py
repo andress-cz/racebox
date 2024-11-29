@@ -262,7 +262,7 @@ async def measure_distances(device):
     first_message = True
     reference_point = None
     points = []
-    current_record = None  # Add this to store the most recent record
+    current_record = None
 
     try:
         client = BleakClient(device)
@@ -294,7 +294,7 @@ async def measure_distances(device):
                             
                             # Clear previous lines
                             if not first_message:
-                                lines_to_clear = 4 if reference_point else 3
+                                lines_to_clear = 3 if reference_point else 2
                                 print(f"\033[{lines_to_clear}A\033[K", end='')
                             else:
                                 first_message = False
@@ -302,7 +302,6 @@ async def measure_distances(device):
                             # Always show current position
                             print(f"Current: {current_record['Latitude']:.6f}°, {current_record['Longitude']:.6f}°")
                             print(f"Accuracy: ±{current_record['Horizontal Accuracy']:.1f} m")
-                            print(f"Altitude: {current_record['WGS Altitude']:.1f} m")
                             
                             # If we have a reference point, show distance to it
                             if reference_point:
@@ -312,7 +311,15 @@ async def measure_distances(device):
                                     current_record['Latitude'],
                                     current_record['Longitude']
                                 )
-                                print(f"Distance to marked point: {distance:.1f} m")
+                                total_distance = sum(
+                                    calculate_distance(
+                                        points[i-1]['Latitude'],
+                                        points[i-1]['Longitude'],
+                                        points[i]['Latitude'],
+                                        points[i]['Longitude']
+                                    ) for i in range(1, len(points))
+                                )
+                                print(f"Distance from last point: {distance:.1f} m, total distance: {total_distance+distance:.1f} m")
                             
                         buffer = buffer[full_packet_length:]
 
@@ -326,21 +333,9 @@ async def measure_distances(device):
             if current_record:
                 points.append(current_record)
                 reference_point = current_record
-                print(f"\nPoint {len(points)} marked at: {current_record['Latitude']:.6f}°, {current_record['Longitude']:.6f}°")
+                print(f"Point {len(points)} marked at: {current_record['Latitude']:.6f}°, {current_record['Longitude']:.6f}° \n\n\n\n")
                 
-                if len(points) > 1:
-                    # Calculate total distance through all points
-                    total_distance = sum(
-                        calculate_distance(
-                            points[i-1]['Latitude'],
-                            points[i-1]['Longitude'],
-                            points[i]['Latitude'],
-                            points[i]['Longitude']
-                        ) for i in range(1, len(points))
-                    )
-                    print(f"Total distance through all points: {total_distance:.1f} m")
-                    # Add extra newline to maintain display spacing
-                    print("")
+
 
     except KeyboardInterrupt:
         print("\nMeasuring stopped by user")
